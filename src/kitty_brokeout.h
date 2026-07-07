@@ -124,11 +124,12 @@ typedef struct {
     Star stars[MAX_STARS];
     int numBricks, numStars;
 
-    int score, highScore, level, lives;
+    int score, highScore, savedHighScore, level, lives;
     int combo;
     float comboTimer;
     float stateTimer;
     float levelTimer;
+    float launchAngle;
     float speedBoostTimer;
     float screenFlash;
     float cameraShake;

@@ -261,6 +261,14 @@ static uint32_t powerup_color(int type)
     return colors[type];
 }
 
+static bool render_has_attached_ball(void)
+{
+    for (int i = 0; i < MAX_BALLS; i++)
+        if (G.balls[i].active && G.balls[i].attached)
+            return true;
+    return false;
+}
+
 static void draw_stars(void)
 {
     float t = G.frameCount / 60.0f;
@@ -393,6 +401,14 @@ static void draw_ball(const Ball *b)
 {
     if (!b->active) return;
     float s = G.scale;
+    if (b->attached) {
+        float len = 108.0f * s;
+        float ex = b->x + sinf(G.launchAngle) * len;
+        float ey = b->y - cosf(G.launchAngle) * len;
+        draw_line(b->x, b->y, ex, ey, 2.0f * s, 0xfacc15, 0.34f);
+        draw_line(b->x, b->y, ex, ey, 1.0f * s, 0xfffbeb, 0.52f);
+        fill_circle(ex, ey, 3.2f * s, 0xfacc15, 0.58f);
+    }
     for (int i = 9; i >= 1; i--) {
         int idx = (b->trailHead + 10 - i) % 10;
         float a = (10 - i) / 10.0f;
@@ -463,17 +479,23 @@ static void draw_hud(void)
     draw_text_shadow(330 * s, 10 * s, buf, 0xfacc15, 1.0f, 1);
     snprintf(buf, sizeof buf, "LIVES %d", G.lives);
     draw_text_shadow(434 * s, 10 * s, buf, G.lives <= 1 ? 0xf87171 : 0x86efac, 1.0f, 1);
+    snprintf(buf, sizeof buf, "BEST %06d", G.highScore);
+    draw_text_shadow(520 * s, 10 * s, buf, 0xa5b4fc, 1.0f, 1);
 
     if (G.combo > 2 && G.comboTimer > 0.0f) {
         snprintf(buf, sizeof buf, "COMBO x%d", G.combo);
         draw_text_shadow(W - 250 * s, 10 * s, buf, 0xf9a8d4, 1.0f, 1);
+    } else if (render_has_attached_ball()) {
+        snprintf(buf, sizeof buf, "AIM %+03d", (int)(G.launchAngle * 180.0f / PI));
+        draw_text_shadow(W - 250 * s, 10 * s, buf, 0xfacc15, 1.0f, 1);
     }
     if (G.speedBoostTimer > 0.0f)
         draw_text_shadow(W - 132 * s, 10 * s, "OVERDRIVE", 0x22d3ee, 1.0f, 1);
 
     fill_rect(0, H - 26 * s, W, 26 * s, 0x020617, 0.70f);
     draw_text(14 * s, H - 20 * s,
-              "LEFT/A RIGHT/D move   SPACE launch   P pause   M sound   R restart   Q quit",
+              W < 850 ? "LEFT/RIGHT move+aim   DOWN center   SPACE launch   P pause   Q quit"
+                      : "LEFT/A RIGHT/D move + aim before launch   DOWN/S center aim   SPACE launch   P pause   Q quit",
               0x64748b, 1.0f, 1);
 }
 
@@ -503,6 +525,11 @@ static void draw_title(void)
     draw_text_center(W * 0.5f, py + 92 * s,
                      "native C brick breaker for kitty graphics terminals",
                      0xa5b4fc, 1.0f, 1);
+    if (G.highScore > 0) {
+        char score[64];
+        snprintf(score, sizeof score, "BEST %06d", G.highScore);
+        draw_text_center(W * 0.5f, py + 112 * s, score, 0xfacc15, 1.0f, 1);
+    }
 
     float bx = px + 95 * s;
     float by = py + 128 * s;
@@ -529,17 +556,18 @@ static void draw_controls(void)
 {
     float s = G.scale;
     float pw = fminf(W - 68 * s, 760 * s);
-    float ph = 348 * s;
+    float ph = 378 * s;
     float px, py;
     panel(pw, ph, &px, &py);
     draw_text_center(W * 0.5f, py + 28 * s, "CONTROLS", 0x7dd3fc, 1.0f, 2);
-    draw_text(px + 74 * s, py + 84 * s,  "LEFT / A       move paddle left", 0xf8fafc, 1.0f, 1);
-    draw_text(px + 74 * s, py + 116 * s, "RIGHT / D      move paddle right", 0xf8fafc, 1.0f, 1);
-    draw_text(px + 74 * s, py + 148 * s, "SPACE / ENTER  launch and advance", 0xf8fafc, 1.0f, 1);
-    draw_text(px + 74 * s, py + 180 * s, "P              pause", 0xf8fafc, 1.0f, 1);
-    draw_text(px + 74 * s, py + 228 * s, "Metal bricks bounce. Purple bricks explode.", 0xa5b4fc, 1.0f, 1);
-    draw_text(px + 74 * s, py + 256 * s, "Cyan bricks trigger overdrive but drop slow capsules.", 0xa5b4fc, 1.0f, 1);
-    draw_text_center(W * 0.5f, py + 314 * s, "ENTER / ESC  BACK", 0x64748b, 1.0f, 1);
+    draw_text(px + 74 * s, py + 82 * s,  "LEFT / A       move paddle left; aim left before launch", 0xf8fafc, 1.0f, 1);
+    draw_text(px + 74 * s, py + 114 * s, "RIGHT / D      move paddle right; aim right before launch", 0xf8fafc, 1.0f, 1);
+    draw_text(px + 74 * s, py + 146 * s, "DOWN / S       center launch aim", 0xf8fafc, 1.0f, 1);
+    draw_text(px + 74 * s, py + 178 * s, "SPACE / ENTER  launch and advance", 0xf8fafc, 1.0f, 1);
+    draw_text(px + 74 * s, py + 210 * s, "P              pause", 0xf8fafc, 1.0f, 1);
+    draw_text(px + 74 * s, py + 258 * s, "Metal bricks bounce. Purple bricks explode.", 0xa5b4fc, 1.0f, 1);
+    draw_text(px + 74 * s, py + 286 * s, "Cyan bricks trigger overdrive but drop slow capsules.", 0xa5b4fc, 1.0f, 1);
+    draw_text_center(W * 0.5f, py + 344 * s, "ENTER / ESC  BACK", 0x64748b, 1.0f, 1);
 }
 
 static void draw_center_message(const char *title, uint32_t titleCol,

@@ -1,11 +1,14 @@
 /* Game state, physics, collisions, level generation, and input. */
 #include "kitty_brokeout.h"
+#include <errno.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define PI 3.14159265358979323846f
+#define SCORE_PATH_MAX 4096
 
 GameState G;
 
@@ -38,6 +41,70 @@ float frandf(void)
 static float frandr(float lo, float hi)
 {
     return lo + (hi - lo) * frandf();
+}
+
+static bool path_join(char *out, size_t outLen, const char *base, const char *suffix)
+{
+    size_t baseLen = strlen(base);
+    size_t suffixLen = strlen(suffix);
+    if (baseLen + suffixLen + 1 > outLen) return false;
+    memcpy(out, base, baseLen);
+    memcpy(out + baseLen, suffix, suffixLen + 1);
+    return true;
+}
+
+static bool high_score_path(char *path, size_t pathLen, bool create)
+{
+    char dir[SCORE_PATH_MAX];
+    const char *xdg = getenv("XDG_DATA_HOME");
+    if (xdg && *xdg) {
+        if (!path_join(dir, sizeof dir, xdg, "/kitty-brokeout")) return false;
+        if (create) mkdir(xdg, 0700);
+    } else {
+        const char *home = getenv("HOME");
+        if (!home || !*home) return false;
+        char local[SCORE_PATH_MAX], share[SCORE_PATH_MAX];
+        if (!path_join(local, sizeof local, home, "/.local")) return false;
+        if (!path_join(share, sizeof share, local, "/share")) return false;
+        if (!path_join(dir, sizeof dir, share, "/kitty-brokeout")) return false;
+        if (create) {
+            mkdir(local, 0700);
+            mkdir(share, 0700);
+        }
+    }
+    if (create && mkdir(dir, 0700) != 0 && errno != EEXIST) return false;
+    return path_join(path, pathLen, dir, "/highscore");
+}
+
+static void load_high_score(void)
+{
+    char path[SCORE_PATH_MAX];
+    if (!high_score_path(path, sizeof path, false)) return;
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    int score = 0;
+    if (fscanf(f, "%d", &score) == 1 && score > 0)
+        G.highScore = score;
+    G.savedHighScore = G.highScore;
+    fclose(f);
+}
+
+static void save_high_score(void)
+{
+    if (G.headless || G.highScore <= G.savedHighScore) return;
+    char path[SCORE_PATH_MAX];
+    if (!high_score_path(path, sizeof path, true)) return;
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", G.highScore);
+    fclose(f);
+    G.savedHighScore = G.highScore;
+}
+
+static void update_high_score(void)
+{
+    if (G.score > G.highScore)
+        G.highScore = G.score;
 }
 
 static void layout_playfield(void)
@@ -92,6 +159,7 @@ static void clear_dynamic(void)
     G.comboTimer = 0.0f;
     G.stateTimer = 0.0f;
     G.levelTimer = 0.0f;
+    G.launchAngle = 0.0f;
     G.speedBoostTimer = 0.0f;
     G.screenFlash = 0.0f;
     G.cameraShake = 0.0f;
@@ -139,6 +207,7 @@ static void attach_new_ball(void)
 {
     memset(G.balls, 0, sizeof G.balls);
     Ball *b = &G.balls[0];
+    G.launchAngle = 0.0f;
     b->active = true;
     b->attached = true;
     b->radius = fmaxf(3.5f, 5.2f * G.scale);
@@ -151,13 +220,27 @@ static void attach_new_ball(void)
 static void launch_ball(Ball *b)
 {
     if (!b || !b->active || !b->attached) return;
-    float angle = frandr(-0.36f, 0.36f);
+    float angle = clampf(G.launchAngle, -0.82f, 0.82f);
     float speed = game_ball_speed_target();
     b->attached = false;
     b->speed = speed;
     b->vx = sinf(angle) * speed;
     b->vy = -cosf(angle) * speed;
     sound_play(SND_LAUNCH, 0.55f, 0.95f + frandf() * 0.1f);
+}
+
+static bool has_attached_ball(void)
+{
+    for (int i = 0; i < MAX_BALLS; i++)
+        if (G.balls[i].active && G.balls[i].attached)
+            return true;
+    return false;
+}
+
+static void nudge_launch_aim(float delta)
+{
+    if (!has_attached_ball()) return;
+    G.launchAngle = clampf(G.launchAngle + delta, -0.82f, 0.82f);
 }
 
 static uint32_t brick_color(const Brick *b)
@@ -332,6 +415,8 @@ static void complete_level_if_needed(void)
         G.state = GS_LEVEL_CLEAR;
         G.stateTimer = 0.0f;
         G.score += 500 + G.level * 120 + G.lives * 75;
+        update_high_score();
+        save_high_score();
         G.screenFlash = fmaxf(G.screenFlash, 0.9f);
         G.cameraShake = fmaxf(G.cameraShake, 9.0f * G.scale);
         sound_play(SND_CLEAR, 0.8f, 1.0f);
@@ -516,7 +601,8 @@ static void lose_life(void)
     G.cameraShake = fmaxf(G.cameraShake, 5.0f * G.scale);
     if (G.lives <= 0) {
         G.state = GS_GAMEOVER;
-        if (G.score > G.highScore) G.highScore = G.score;
+        update_high_score();
+        save_high_score();
     } else {
         G.state = GS_BALL_LOST;
         attach_new_ball();
@@ -649,6 +735,7 @@ void game_init(int w, int h, uint32_t seed)
     G.soundEnabled = true;
     frand_seed(seed);
     layout_playfield();
+    load_high_score();
 
     G.numStars = MAX_STARS;
     for (int i = 0; i < G.numStars; i++) {
@@ -667,6 +754,8 @@ void game_init(int w, int h, uint32_t seed)
 
 void game_shutdown(void)
 {
+    update_high_score();
+    save_high_score();
 }
 
 void game_tick(void)
@@ -712,6 +801,7 @@ void game_tick(void)
         for (int i = 0; i < MAX_BALLS; i++)
             tick_ball(&G.balls[i]);
         tick_powerups();
+        update_high_score();
 
         if (game_active_ball_count() == 0)
             lose_life();
@@ -735,6 +825,7 @@ static void move_intent(float axis)
     G.paddle.moveAxis = axis;
     G.paddle.intentTimer = 0.135f;
     if (G.state == GS_PLAYING) {
+        nudge_launch_aim(axis * 0.075f);
         for (int i = 0; i < MAX_BALLS; i++) {
             if (G.balls[i].active && G.balls[i].attached) {
                 G.balls[i].x = G.paddle.x + G.paddle.w * 0.5f;
@@ -808,6 +899,7 @@ void game_handle_key(int key)
     if (G.state == GS_PLAYING || G.state == GS_BALL_LOST) {
         if (key == KEY_LEFT || key == 'a') move_intent(-1.0f);
         else if (key == KEY_RIGHT || key == 'd') move_intent(1.0f);
+        else if (key == KEY_DOWN || key == 's') G.launchAngle = 0.0f;
         else if (key == KEY_ENTER || key == ' ' || key == KEY_UP || key == 'w')
             launch_all_attached();
         return;
@@ -874,5 +966,6 @@ void game_force_gameover(void)
     G.state = GS_GAMEOVER;
     G.lives = 0;
     G.stateTimer = 0.0f;
-    if (G.score > G.highScore) G.highScore = G.score;
+    update_high_score();
+    save_high_score();
 }

@@ -17,6 +17,8 @@ level progression, procedural sound, and headless test modes.
 - Fixed-timestep gameplay with substepped ball collisions
 - Multi-hit, metal, explosive, and speed bricks
 - Wide paddle, slow, multiball, and shield capsules
+- Aimed launch with a visible guide line
+- Persistent local best score
 - Particles, ball trails, screen flash, and screen shake
 - Procedural sound through `pacat`, `pw-play`, `aplay`, or sox `play`
 - Deterministic selftests and render tests for CI
@@ -38,8 +40,9 @@ sox `play`. If none exists, the game runs silently.
 
 | Key | Action |
 |-----|--------|
-| Left / A | move paddle left |
-| Right / D | move paddle right |
+| Left / A | move paddle left; aim left before launch |
+| Right / D | move paddle right; aim right before launch |
+| Down / S | center launch aim |
 | Space / Enter / Up / W | launch ball, advance screens |
 | P | pause |
 | M | toggle sound |
@@ -57,8 +60,8 @@ make test
 ./kitty-brokeout --sound-test
 ```
 
-`--render-test` writes PPM screenshots for title, gameplay, level clear, and
-game-over states without needing an interactive terminal.
+`--render-test` writes PPM screenshots for title, ready/aim, gameplay, level
+clear, and game-over states without needing an interactive terminal.
 
 ## Architecture
 

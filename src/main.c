@@ -100,12 +100,17 @@ static int selftest(unsigned seed, int ticks)
 static int render_test(unsigned seed)
 {
     game_init(1000, 640, seed);
+    G.headless = true;
     render_init(G.W, G.H);
 
     render_frame();
     dump_ppm("render_title.ppm");
 
     game_start_run();
+    G.launchAngle = 0.48f;
+    render_frame();
+    dump_ppm("render_ready.ppm");
+
     for (int i = 0; i < 180; i++) {
         game_autopilot_tick();
         game_tick();
