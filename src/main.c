@@ -1,5 +1,6 @@
 /* Entry point: terminal setup, fixed timestep, and headless checks. */
 #include "kitty_brokeout.h"
+#include <limits.h>
 #include <math.h>
 #include <signal.h>
 #include <stdio.h>
@@ -13,6 +14,45 @@ static void on_signal(int sig)
     (void)sig;
     term_emergency_restore();
     _exit(1);
+}
+
+static bool event_matches_letter(const kittykb_event *event, char lower)
+{
+    char upper = (char)(lower - 'a' + 'A');
+    return kittykb_event_matches_key(event, (uint32_t)(unsigned char)lower) ||
+           kittykb_event_matches_key(event, (uint32_t)(unsigned char)upper);
+}
+
+static int game_key_from_event(const kittykb_event *event)
+{
+    static const char letters[] = "acdmpqrsw";
+    for (size_t i = 0; i < sizeof letters - 1; i++)
+        if (event_matches_letter(event, letters[i])) return letters[i];
+
+    switch (event->key) {
+    case KITTYKB_KEY_ENTER: return KEY_ENTER;
+    case KITTYKB_KEY_BACKSPACE: return KEY_BACKSPACE;
+    case KITTYKB_KEY_TAB: return KEY_TAB;
+    case KITTYKB_KEY_ESCAPE: return KEY_ESC;
+    case KITTYKB_KEY_UP: return KEY_UP;
+    case KITTYKB_KEY_DOWN: return KEY_DOWN;
+    case KITTYKB_KEY_RIGHT: return KEY_RIGHT;
+    case KITTYKB_KEY_LEFT: return KEY_LEFT;
+    default:
+        return event->key <= (uint32_t)INT_MAX ? (int)event->key : -1;
+    }
+}
+
+static bool direction_key(int key)
+{
+    return key == KEY_LEFT || key == KEY_RIGHT || key == 'a' || key == 'd';
+}
+
+static bool interrupt_event(const kittykb_event *event)
+{
+    return event->key == 3u ||
+           (event_matches_letter(event, 'c') &&
+            (event->modifiers & KITTYKB_MOD_CTRL) != 0u);
 }
 
 static double now_ms(void)
@@ -97,6 +137,62 @@ static int selftest(unsigned seed, int ticks)
     return 0;
 }
 
+static int input_test(void)
+{
+    int failures = 0;
+#define EXPECT(condition, label) do { \
+    if (!(condition)) { fprintf(stderr, "FAIL: %s\n", label); failures++; } \
+    else printf("PASS: %s\n", label); \
+} while (0)
+    game_init(1000, 640, 1337);
+    G.headless = true;
+    game_start_run();
+
+    float before = G.paddle.x;
+    game_set_held_controls(true, false, true);
+    game_tick();
+    EXPECT(G.paddle.x > before && G.paddle.moveAxis == 1.0f,
+           "held right moves the paddle continuously");
+
+    before = G.paddle.x;
+    game_set_held_controls(true, true, true);
+    game_tick();
+    EXPECT(fabsf(G.paddle.x - before) < 0.001f && G.paddle.moveAxis == 0.0f,
+           "simultaneous opposite directions cancel");
+
+    game_set_held_controls(true, true, false);
+    game_tick();
+    EXPECT(G.paddle.x < before && G.paddle.moveAxis == -1.0f,
+           "releasing right preserves held left");
+
+    before = G.paddle.x;
+    game_set_held_controls(true, false, false);
+    game_tick();
+    EXPECT(fabsf(G.paddle.x - before) < 0.001f && G.paddle.moveAxis == 0.0f,
+           "release stops the paddle immediately");
+
+    G.launchAngle = 0.0f;
+    game_handle_key('a');
+    EXPECT(G.launchAngle < 0.0f,
+           "direction presses retain pre-launch aim adjustment");
+
+    game_set_held_controls(false, false, false);
+    before = G.paddle.x;
+    game_handle_key('d');
+    game_tick();
+    EXPECT(G.paddle.x > before,
+           "legacy press-only fallback retains paddle intent");
+    for (int i = 0; i < 10; i++) game_tick();
+    before = G.paddle.x;
+    game_tick();
+    EXPECT(fabsf(G.paddle.x - before) < 0.001f && G.paddle.moveAxis == 0.0f,
+           "legacy paddle intent expires without release events");
+
+    game_shutdown();
+#undef EXPECT
+    return failures ? 1 : 0;
+}
+
 static int render_test(unsigned seed)
 {
     game_init(1000, 640, seed);
@@ -179,9 +275,28 @@ static int run_interactive(void)
     double next = now_ms();
 
     while (!G.quit) {
-        int key;
-        while ((key = term_poll_key()) != -1)
+        kittykb_event event;
+        if (term_read_input() < 0) {
+            G.quit = true;
+            break;
+        }
+        bool heldInput = term_has_release_events();
+        game_set_held_controls(
+            heldInput,
+            term_key_down('a') || term_key_down(KITTYKB_KEY_LEFT),
+            term_key_down('d') || term_key_down(KITTYKB_KEY_RIGHT));
+        while (term_next_key_event(&event)) {
+            if (event.action == KITTYKB_ACTION_RELEASE) continue;
+            if (interrupt_event(&event)) {
+                G.quit = true;
+                continue;
+            }
+            int key = game_key_from_event(&event);
+            if (key < 0 || (event.action == KITTYKB_ACTION_REPEAT &&
+                            !direction_key(key))) continue;
             game_handle_key(key);
+        }
+        if (G.quit) break;
 
         game_tick();
         game_tick();
@@ -207,6 +322,9 @@ int main(int argc, char **argv)
         unsigned seed = argc > 2 ? (unsigned)strtoul(argv[2], NULL, 10) : 1337;
         int ticks = argc > 3 ? atoi(argv[3]) : 7200;
         return selftest(seed, ticks);
+    }
+    if (argc > 1 && !strcmp(argv[1], "--input-test")) {
+        return input_test();
     }
     if (argc > 1 && !strcmp(argv[1], "--render-test")) {
         unsigned seed = argc > 2 ? (unsigned)strtoul(argv[2], NULL, 10) : 1337;

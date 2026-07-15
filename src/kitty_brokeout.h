@@ -8,6 +8,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "kitty_keyboard.h"
+
 #define TICK_DT  (1.0f / 60.0f)
 #define TICK_MS  16.666666f
 
@@ -135,6 +137,7 @@ typedef struct {
     float cameraShake;
     int frameCount;
     bool soundEnabled;
+    bool heldControls, heldLeft, heldRight;
 
     uint32_t rng;
 } GameState;
@@ -153,6 +156,7 @@ void game_reset_to_title(void);
 void game_start_run(void);
 void game_tick(void);
 void game_handle_key(int key);
+void game_set_held_controls(bool available, bool left, bool right);
 void game_autopilot_tick(void);
 void game_force_level_clear(void);
 void game_force_gameover(void);
@@ -170,7 +174,10 @@ uint8_t *render_fb(void);
 /* ---------- term.c ---------- */
 bool term_init(int *outW, int *outH);
 void term_present(const uint8_t *rgba, int w, int h);
-int term_poll_key(void);
+int term_read_input(void);
+bool term_next_key_event(kittykb_event *event);
+bool term_key_down(uint32_t key);
+bool term_has_release_events(void);
 void term_shutdown(void);
 void term_emergency_restore(void);
 

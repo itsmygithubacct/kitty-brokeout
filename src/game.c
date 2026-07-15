@@ -779,13 +779,19 @@ void game_tick(void)
             if (G.comboTimer <= 0.0f) G.combo = 0;
         }
 
-        if (G.paddle.intentTimer > 0.0f) {
-            float speed = 610.0f * G.scale;
-            G.paddle.x += G.paddle.moveAxis * speed * TICK_DT;
+        float paddleAxis = 0.0f;
+        if (G.heldControls) {
+            paddleAxis = (G.heldRight ? 1.0f : 0.0f) -
+                         (G.heldLeft ? 1.0f : 0.0f);
+            G.paddle.moveAxis = paddleAxis;
+            G.paddle.intentTimer = 0.0f;
+        } else if (G.paddle.intentTimer > 0.0f) {
+            paddleAxis = G.paddle.moveAxis;
             G.paddle.intentTimer -= TICK_DT;
         } else {
             G.paddle.moveAxis = 0.0f;
         }
+        G.paddle.x += paddleAxis * 610.0f * G.scale * TICK_DT;
 
         if (G.paddle.wideTimer > 0.0f) {
             G.paddle.wideTimer -= TICK_DT;
@@ -832,6 +838,18 @@ static void move_intent(float axis)
                 G.balls[i].y = G.paddle.y - G.balls[i].radius - 2.0f * G.scale;
             }
         }
+    }
+}
+
+void game_set_held_controls(bool available, bool left, bool right)
+{
+    G.heldControls = available;
+    G.heldLeft = available && left;
+    G.heldRight = available && right;
+    if (available) {
+        G.paddle.moveAxis = (G.heldRight ? 1.0f : 0.0f) -
+                            (G.heldLeft ? 1.0f : 0.0f);
+        G.paddle.intentTimer = 0.0f;
     }
 }
 

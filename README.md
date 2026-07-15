@@ -14,6 +14,8 @@ level progression, procedural sound, and headless test modes.
 ## Features
 
 - Kitty-protocol pixel graphics with double-buffered terminal frames
+- Exact held-key movement with independent press/release tracking and a
+  press-only compatibility fallback
 - Fixed-timestep gameplay with substepped ball collisions
 - Multi-hit, metal, explosive, and speed bricks
 - Wide paddle, slow, multiball, and shield capsules
@@ -67,7 +69,7 @@ clear, and game-over states without needing an interactive terminal.
 
 | File | Role |
 |------|------|
-| `src/term.c` | raw mode, key decoding, kitty graphics frames |
+| `src/term.c` | Kitty keyboard events, compatibility input, kitty graphics frames |
 | `src/game.c` | breakout rules, physics, levels, particles, powerups |
 | `src/render.c` | software rasterizer, scene, HUD, menus |
 | `src/sound.c` | procedural SFX synth and mixer |
