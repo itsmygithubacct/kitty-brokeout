@@ -1,10 +1,14 @@
-/* Procedural audio: the effect bank is synthesized here at startup; the
- * transport (sink probe, pipe pacing) and the voice mixer live in the
- * vendored pcm-mixer library. */
+/* Banked PCM audio with a procedural fallback. The effect bank is synthesized
+ * at startup, then each valid reviewed WAV replaces its corresponding sample.
+ * Transport and voice mixing live in the vendored pcm-mixer library. */
 #include "kitty_brokeout.h"
 #include "pcm_mixer.h"
+#include <limits.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #define SR 44100
 #define MAX_VOICES 24
@@ -174,11 +178,80 @@ static void synth_all(void)
     gen_sweep(SND_MENU, 560.0f, 720.0f, 0.07f, 0.17f);
 }
 
+static const char *const sound_files[SOUND_COUNT] = {
+    [SND_PADDLE] = "sfx/paddle.wav",
+    [SND_BRICK] = "sfx/brick.wav",
+    [SND_METAL] = "sfx/metal.wav",
+    [SND_EXPLODE] = "sfx/explode.wav",
+    [SND_POWERUP] = "sfx/powerup.wav",
+    [SND_LAUNCH] = "sfx/launch.wav",
+    [SND_LOSE] = "sfx/lose.wav",
+    [SND_CLEAR] = "sfx/clear.wav",
+    [SND_MENU] = "sfx/menu.wav",
+};
+
+static char sound_asset_root[512] = "assets";
+
+static void sound_asset_paths_init(void)
+{
+    const char *override = getenv("KITTY_BROKEOUT_ASSETS");
+    char executable[400];
+    char candidate[512];
+    char *slash;
+    ssize_t length;
+
+    if (override && *override) {
+        snprintf(sound_asset_root, sizeof sound_asset_root, "%s", override);
+        return;
+    }
+    length = readlink("/proc/self/exe", executable, sizeof executable - 1);
+    if (length <= 0) return;
+    executable[length] = '\0';
+    slash = strrchr(executable, '/');
+    if (!slash) return;
+    *slash = '\0';
+    snprintf(candidate, sizeof candidate, "%s/assets", executable);
+    if (access(candidate, F_OK) == 0) {
+        snprintf(sound_asset_root, sizeof sound_asset_root, "%s", candidate);
+        return;
+    }
+    snprintf(candidate, sizeof candidate,
+             "%s/../share/kitty-brokeout/assets", executable);
+    if (access(candidate, F_OK) == 0)
+        snprintf(sound_asset_root, sizeof sound_asset_root, "%s", candidate);
+}
+
+static void load_external_sounds(void)
+{
+    sound_asset_paths_init();
+    for (int id = 0; id < SOUND_COUNT; id++) {
+        char full[768];
+        char err[128];
+        size_t frames = 0;
+        int16_t *data;
+
+        if (!sound_files[id]) continue;
+        if (snprintf(full, sizeof full, "%s/%s", sound_asset_root,
+                     sound_files[id]) >= (int)sizeof full)
+            continue;
+        data = pcmmix_wav_load(full, &frames, err, sizeof err);
+        if (!data) continue;
+        if (frames == 0 || frames > (size_t)INT_MAX) {
+            pcmmix_wav_free(data);
+            continue;
+        }
+        free(samples[id].data);
+        samples[id].data = data;
+        samples[id].len = (int)frames;
+    }
+}
+
 bool sound_init(void)
 {
     pcmmix_options options;
 
     synth_all();
+    load_external_sounds();
     pcmmix_options_init(&options);
     options.sample_rate = SR;
     options.max_voices = MAX_VOICES;

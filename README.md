@@ -9,7 +9,8 @@ terminal as kitty image frames.
 
 The game has a responsive playfield, multi-hit bricks, metal bricks, explosive
 bricks, speed bricks, falling capsules, particles, ball trails, screen shake,
-level progression, procedural sound, and headless test modes.
+level progression, a locally generated sound bank with procedural fallback,
+and headless test modes.
 
 ## Features
 
@@ -22,7 +23,8 @@ level progression, procedural sound, and headless test modes.
 - Aimed launch with a visible guide line
 - Persistent local best score
 - Particles, ball trails, screen flash, and screen shake
-- Procedural sound through `pacat`, `pw-play`, `aplay`, or sox `play`
+- Nine reviewed local SFX with a safe procedural fallback, played through
+  `pacat`, `pw-play`, `aplay`, or sox `play`
 - Deterministic selftests and render tests for CI
 
 ## Build
@@ -72,7 +74,7 @@ clear, and game-over states without needing an interactive terminal.
 | `src/term.c` | input glue over `kitty_keyboard`, presenter glue over `kitty-framebuffer` |
 | `src/game.c` | breakout rules, physics, levels, particles, powerups |
 | `src/render.c` | scene, HUD, and menu drawing over the `soft-raster` primitives |
-| `src/sound.c` | procedural SFX synth, played through `pcm-mixer` |
+| `src/sound.c` | reviewed WAV bank + procedural fallback, played through `pcm-mixer` |
 | `src/main.c` | interactive loop, selftest, render-test, sound-test |
 
 Generic terminal presentation, rasterization, and audio transport live in
@@ -83,4 +85,5 @@ probe), and `kitty_keyboard` (keyboard protocol decoding).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Code is MIT; the shipped SFX bank is CC0-derived. See [LICENSE](LICENSE) and
+[the per-file audio provenance](docs/audio-provenance.json).
