@@ -1,6 +1,15 @@
-/* Software renderer: draws an RGBA framebuffer for the kitty presenter. */
+/* Software renderer: draws an RGBA framebuffer for the kitty presenter.
+ *
+ * All generic rasterization (blending, primitives, the 8x16 font) lives in
+ * the vendored soft-raster library, which keeps the game's original
+ * fixed-point coverage math byte for byte.  This file owns the
+ * game-specific drawing: backdrop cache, starfield, bricks, paddle, balls,
+ * HUD and overlays.  soft-raster canvases hold 0xAARRGGBB words; the
+ * presenter and the PPM dumps consume R,G,B,A byte quadruplets, so
+ * render_frame() finishes by repacking the canvas into a byte buffer.
+ */
 #include "kitty_brokeout.h"
-#include "font8x16.h"
+#include "soft_raster.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,238 +17,100 @@
 
 #define PI 3.14159265358979323846f
 
-static uint8_t *fb = NULL;
-static uint8_t *backdrop = NULL;
+static sr_canvas canvas;    /* frame being drawn, 0xAARRGGBB */
+static sr_canvas backdrop;  /* cached gradient + vignette, 0xAARRGGBB */
+static uint8_t *fb = NULL;  /* finished frame as R,G,B,A bytes */
 static int W = 0, H = 0;
-static int OX = 0, OY = 0;
+static int OX = 0, OY = 0;  /* camera shake offset, whole pixels */
 
 uint8_t *render_fb(void) { return fb; }
 
-static uint32_t mix_rgb(uint32_t a, uint32_t b, float t)
+/* Thin shims: same names and argument order the drawing code always used,
+ * routed through soft-raster with the shake offset applied.  The offset is
+ * integral, so shifting the float coordinates up front blends exactly the
+ * same pixels the old per-pixel offset did. */
+static inline void set_px(int x, int y, uint32_t rgb)
 {
-    t = clampf(t, 0, 1);
-    int ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
-    int br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
-    int r = ar + (int)((br - ar) * t);
-    int g = ag + (int)((bg - ag) * t);
-    int bl = ab + (int)((bb - ab) * t);
-    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)bl;
+    sr_px(&canvas, x + OX, y + OY, rgb);
 }
 
-static uint32_t scale_rgb(uint32_t rgb, float k)
+static void fill_rect(float x, float y, float w, float h, uint32_t rgb, float a)
 {
-    k = clampf(k, 0, 2);
-    int r = (int)(((rgb >> 16) & 255) * k);
-    int g = (int)(((rgb >> 8) & 255) * k);
-    int b = (int)((rgb & 255) * k);
-    if (r > 255) r = 255;
-    if (g > 255) g = 255;
-    if (b > 255) b = 255;
-    return ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+    sr_fill_rect(&canvas, x + OX, y + OY, w, h, rgb, a);
+}
+
+static void stroke_rect(float x, float y, float w, float h,
+                        float line, uint32_t rgb, float a)
+{
+    sr_stroke_rect(&canvas, x + OX, y + OY, w, h, line, rgb, a);
+}
+
+static void fill_circle(float cx, float cy, float r, uint32_t rgb, float a)
+{
+    sr_fill_circle(&canvas, cx + OX, cy + OY, r, rgb, a);
+}
+
+static void ring(float cx, float cy, float r, float width, uint32_t rgb, float a)
+{
+    sr_ring(&canvas, cx + OX, cy + OY, r, width, rgb, a);
+}
+
+static void draw_line(float x0, float y0, float x1, float y1,
+                      float width, uint32_t rgb, float a)
+{
+    sr_line(&canvas, x0 + OX, y0 + OY, x1 + OX, y1 + OY, width, rgb, a, 0, 0);
+}
+
+static void draw_text(float fx, float fy, const char *s, uint32_t rgb, float a, int scale)
+{
+    sr_text(&canvas, fx + OX, fy + OY, s, rgb, a, scale);
+}
+
+static void draw_text_shadow(float x, float y, const char *s,
+                             uint32_t rgb, float a, int scale)
+{
+    sr_text_shadow(&canvas, x + OX, y + OY, s, rgb, a, scale);
+}
+
+static void draw_text_center(float cx, float y, const char *s,
+                             uint32_t rgb, float a, int scale)
+{
+    sr_text_center(&canvas, cx + OX, y + OY, s, rgb, a, scale);
 }
 
 void render_init(int w, int h)
 {
     W = w;
     H = h;
+    sr_canvas_init(&canvas, W, H);
+    sr_canvas_init(&backdrop, W, H);
     fb = malloc((size_t)W * H * 4);
-    backdrop = malloc((size_t)W * H * 4);
 
     for (int y = 0; y < H; y++) {
         float v = (float)y / fmaxf(1.0f, H - 1.0f);
         uint32_t top = 0x050713;
         uint32_t mid = 0x10142a;
         uint32_t bot = 0x13091b;
-        uint32_t c = v < 0.58f ? mix_rgb(top, mid, v / 0.58f)
-                               : mix_rgb(mid, bot, (v - 0.58f) / 0.42f);
+        uint32_t c = v < 0.58f ? sr_mix(top, mid, v / 0.58f)
+                               : sr_mix(mid, bot, (v - 0.58f) / 0.42f);
         int r = (c >> 16) & 255, g = (c >> 8) & 255, b = c & 255;
         for (int x = 0; x < W; x++) {
             float u = fabsf((float)x / fmaxf(1.0f, W - 1.0f) - 0.5f) * 2.0f;
             float vignette = 1.0f - 0.42f * powf(clampf(u * 0.9f + v * 0.35f, 0, 1), 1.6f);
-            uint8_t *p = backdrop + ((size_t)y * W + x) * 4;
-            p[0] = (uint8_t)(r * vignette);
-            p[1] = (uint8_t)(g * vignette);
-            p[2] = (uint8_t)(b * vignette);
-            p[3] = 255;
+            backdrop.px[(size_t)y * W + x] = 0xff000000u |
+                ((uint32_t)(uint8_t)(r * vignette) << 16) |
+                ((uint32_t)(uint8_t)(g * vignette) << 8) |
+                (uint32_t)(uint8_t)(b * vignette);
         }
     }
 }
 
 void render_shutdown(void)
 {
+    sr_canvas_free(&canvas);
+    sr_canvas_free(&backdrop);
     free(fb);
-    free(backdrop);
-    fb = backdrop = NULL;
-}
-
-static inline void set_px(int x, int y, uint32_t rgb)
-{
-    x += OX;
-    y += OY;
-    if (x < 0 || x >= W || y < 0 || y >= H) return;
-    uint8_t *p = fb + ((size_t)y * W + x) * 4;
-    p[0] = (rgb >> 16) & 255;
-    p[1] = (rgb >> 8) & 255;
-    p[2] = rgb & 255;
-    p[3] = 255;
-}
-
-static inline void px_blend(int x, int y, uint32_t rgb, float a)
-{
-    x += OX;
-    y += OY;
-    if (x < 0 || x >= W || y < 0 || y >= H) return;
-    int ai = (int)(clampf(a, 0, 1) * 256.0f + 0.5f);
-    if (ai <= 0) return;
-    uint8_t *p = fb + ((size_t)y * W + x) * 4;
-    int r = (rgb >> 16) & 255;
-    int g = (rgb >> 8) & 255;
-    int b = rgb & 255;
-    p[0] = (uint8_t)(p[0] + (((r - p[0]) * ai) >> 8));
-    p[1] = (uint8_t)(p[1] + (((g - p[1]) * ai) >> 8));
-    p[2] = (uint8_t)(p[2] + (((b - p[2]) * ai) >> 8));
-}
-
-static void fill_rect(float fx, float fy, float fw, float fh, uint32_t rgb, float a)
-{
-    if (fw <= 0 || fh <= 0) return;
-    int x0 = (int)floorf(fx), x1 = (int)ceilf(fx + fw);
-    int y0 = (int)floorf(fy), y1 = (int)ceilf(fy + fh);
-    for (int y = y0; y < y1; y++) {
-        float cy = fminf((float)(y + 1), fy + fh) - fmaxf((float)y, fy);
-        if (cy <= 0) continue;
-        if (cy > 1) cy = 1;
-        for (int x = x0; x < x1; x++) {
-            float cx = fminf((float)(x + 1), fx + fw) - fmaxf((float)x, fx);
-            if (cx <= 0) continue;
-            if (cx > 1) cx = 1;
-            px_blend(x, y, rgb, a * cx * cy);
-        }
-    }
-}
-
-static void stroke_rect(float x, float y, float w, float h,
-                        float line, uint32_t rgb, float a)
-{
-    fill_rect(x, y, w, line, rgb, a);
-    fill_rect(x, y + h - line, w, line, rgb, a);
-    fill_rect(x, y, line, h, rgb, a);
-    fill_rect(x + w - line, y, line, h, rgb, a);
-}
-
-static void fill_circle(float cx, float cy, float r, uint32_t rgb, float a)
-{
-    if (r <= 0) return;
-    float rOut = r + 0.5f;
-    float rIn = r - 0.5f;
-    float rOut2 = rOut * rOut;
-    float rIn2 = rIn > 0 ? rIn * rIn : 0;
-    int y0 = (int)floorf(cy - rOut), y1 = (int)ceilf(cy + rOut);
-    for (int y = y0; y <= y1; y++) {
-        float dy = y + 0.5f - cy;
-        float w2 = rOut2 - dy * dy;
-        if (w2 <= 0) continue;
-        float half = sqrtf(w2);
-        int x0 = (int)floorf(cx - half), x1 = (int)ceilf(cx + half);
-        for (int x = x0; x <= x1; x++) {
-            float dx = x + 0.5f - cx;
-            float d2 = dx * dx + dy * dy;
-            if (d2 >= rOut2) continue;
-            if (d2 <= rIn2) px_blend(x, y, rgb, a);
-            else {
-                float cov = rOut - sqrtf(d2);
-                px_blend(x, y, rgb, a * clampf(cov, 0, 1));
-            }
-        }
-    }
-}
-
-static void ring(float cx, float cy, float r, float width, uint32_t rgb, float a)
-{
-    float hw = width * 0.5f;
-    int x0 = (int)floorf(cx - r - hw) - 1;
-    int x1 = (int)ceilf(cx + r + hw) + 1;
-    int y0 = (int)floorf(cy - r - hw) - 1;
-    int y1 = (int)ceilf(cy + r + hw) + 1;
-    for (int y = y0; y < y1; y++) {
-        for (int x = x0; x < x1; x++) {
-            float dx = x + 0.5f - cx;
-            float dy = y + 0.5f - cy;
-            float d = sqrtf(dx * dx + dy * dy);
-            float cov = hw + 0.5f - fabsf(d - r);
-            if (cov > 0) px_blend(x, y, rgb, a * clampf(cov, 0, 1));
-        }
-    }
-}
-
-static void draw_line(float x0, float y0, float x1, float y1,
-                      float width, uint32_t rgb, float a)
-{
-    float dx = x1 - x0, dy = y1 - y0;
-    float len2 = dx * dx + dy * dy;
-    if (len2 < 0.1f) {
-        fill_circle(x0, y0, width * 0.5f, rgb, a);
-        return;
-    }
-    float hw = fmaxf(0.5f, width * 0.5f);
-    int xMin = (int)floorf(fminf(x0, x1) - hw) - 1;
-    int xMax = (int)ceilf(fmaxf(x0, x1) + hw) + 1;
-    int yMin = (int)floorf(fminf(y0, y1) - hw) - 1;
-    int yMax = (int)ceilf(fmaxf(y0, y1) + hw) + 1;
-    for (int y = yMin; y < yMax; y++) {
-        for (int x = xMin; x < xMax; x++) {
-            float px = x + 0.5f - x0;
-            float py = y + 0.5f - y0;
-            float t = clampf((px * dx + py * dy) / len2, 0, 1);
-            float qx = px - t * dx;
-            float qy = py - t * dy;
-            float cov = hw + 0.5f - sqrtf(qx * qx + qy * qy);
-            if (cov > 0) px_blend(x, y, rgb, a * clampf(cov, 0, 1));
-        }
-    }
-}
-
-static int text_width(const char *s, int scale)
-{
-    return (int)strlen(s) * FONT_W * scale;
-}
-
-static void draw_glyph(int x, int y, const unsigned char *glyph,
-                       uint32_t rgb, float a, int scale)
-{
-    for (int gy = 0; gy < FONT_H; gy++) {
-        uint8_t row = glyph[gy];
-        for (int gx = 0; gx < FONT_W; gx++) {
-            if (!((row >> (7 - gx)) & 1)) continue;
-            for (int sy = 0; sy < scale; sy++)
-                for (int sx = 0; sx < scale; sx++)
-                    px_blend(x + gx * scale + sx, y + gy * scale + sy, rgb, a);
-        }
-    }
-}
-
-static void draw_text(float fx, float fy, const char *s, uint32_t rgb, float a, int scale)
-{
-    int x = (int)fx, y = (int)fy;
-    for (; *s; s++) {
-        unsigned char c = (unsigned char)*s;
-        if (c < 32 || c > 126) c = '?';
-        draw_glyph(x, y, font8x16[c - 32], rgb, a, scale);
-        x += FONT_W * scale;
-    }
-}
-
-static void draw_text_shadow(float x, float y, const char *s,
-                             uint32_t rgb, float a, int scale)
-{
-    draw_text(x + scale, y + scale, s, 0x000000, a * 0.75f, scale);
-    draw_text(x, y, s, rgb, a, scale);
-}
-
-static void draw_text_center(float cx, float y, const char *s,
-                             uint32_t rgb, float a, int scale)
-{
-    draw_text(cx - text_width(s, scale) * 0.5f, y, s, rgb, a, scale);
+    fb = NULL;
 }
 
 static uint32_t brick_color(const Brick *b)
@@ -294,7 +165,7 @@ static void draw_grid(void)
     float horizon = G.playY + G.playH + 4.0f * s;
     for (float x = G.playX; x <= G.playX + G.playW + 1; x += step) {
         float k = (x - G.playX) / G.playW;
-        uint32_t col = mix_rgb(0x172554, 0x581c87, k);
+        uint32_t col = sr_mix(0x172554, 0x581c87, k);
         draw_line(x, horizon, G.playX + G.playW * 0.5f + (x - (G.playX + G.playW * 0.5f)) * 0.42f,
                   G.playY + 80.0f * s, 1.0f, col, 0.12f);
     }
@@ -335,9 +206,9 @@ static void draw_brick(const Brick *b)
     float x = b->x, y = b->y, w = b->w, h = b->h;
     fill_rect(x - 3 * G.scale, y - 3 * G.scale, w + 6 * G.scale, h + 6 * G.scale,
               base, 0.10f + pulse * 0.16f);
-    fill_rect(x, y, w, h, scale_rgb(base, 0.58f), 1.0f);
-    fill_rect(x + 1, y + 1, w - 2, h * 0.47f, scale_rgb(base, 1.22f), 0.94f);
-    fill_rect(x + 1, y + h * 0.52f, w - 2, h * 0.43f, scale_rgb(base, 0.78f), 0.96f);
+    fill_rect(x, y, w, h, sr_scale_rgb(base, 0.58f), 1.0f);
+    fill_rect(x + 1, y + 1, w - 2, h * 0.47f, sr_scale_rgb(base, 1.22f), 0.94f);
+    fill_rect(x + 1, y + h * 0.52f, w - 2, h * 0.43f, sr_scale_rgb(base, 0.78f), 0.96f);
     stroke_rect(x, y, w, h, fmaxf(1.0f, G.scale), 0xffffff, 0.16f);
     fill_rect(x + 2 * G.scale, y + 2 * G.scale, w - 4 * G.scale, fmaxf(1, h * 0.12f),
               0xffffff, 0.18f);
@@ -383,9 +254,9 @@ static void draw_paddle(void)
               core, 0.12f);
     fill_rect(p->x, p->y, p->w, p->h, 0x052e16, 1.0f);
     fill_rect(p->x + 2 * s, p->y + 1 * s, p->w - 4 * s, p->h * 0.45f,
-              scale_rgb(core, 1.15f), 0.98f);
+              sr_scale_rgb(core, 1.15f), 0.98f);
     fill_rect(p->x + 2 * s, p->y + p->h * 0.48f, p->w - 4 * s, p->h * 0.40f,
-              scale_rgb(core, 0.68f), 0.98f);
+              sr_scale_rgb(core, 0.68f), 0.98f);
     stroke_rect(p->x, p->y, p->w, p->h, fmaxf(1.0f, s), 0xffffff, 0.28f);
 
     int segs = 7;
@@ -445,9 +316,9 @@ static void draw_powerups(void)
         uint32_t col = powerup_color(u->type);
         float bob = sinf(u->phase) * 1.5f * s;
         fill_rect(x - 4 * s, y + bob - 4 * s, w + 8 * s, h + 8 * s, col, 0.12f);
-        fill_rect(x, y + bob, w, h, scale_rgb(col, 0.72f), 1.0f);
+        fill_rect(x, y + bob, w, h, sr_scale_rgb(col, 0.72f), 1.0f);
         fill_rect(x + 2 * s, y + bob + 1 * s, w - 4 * s, h * 0.43f,
-                  scale_rgb(col, 1.20f), 0.95f);
+                  sr_scale_rgb(col, 1.20f), 0.95f);
         stroke_rect(x, y + bob, w, h, 1.0f * s, 0xffffff, 0.28f);
         char label[2] = { POWERUP_NAMES[u->type][0], 0 };
         draw_text_center(u->x, y + bob + h * 0.5f - 7 * s, label, 0x030712, 0.9f, 1);
@@ -538,9 +409,9 @@ static void draw_title(void)
         for (int c = 0; c < 8; c++) {
             uint32_t col = r == 0 ? 0xef4444 : r == 1 ? 0xf97316 : 0x22d3ee;
             fill_rect(bx + c * bw + 2 * s, by + r * 21 * s, bw - 4 * s, 14 * s,
-                      scale_rgb(col, 0.68f), 1.0f);
+                      sr_scale_rgb(col, 0.68f), 1.0f);
             fill_rect(bx + c * bw + 4 * s, by + r * 21 * s + 2 * s, bw - 8 * s, 5 * s,
-                      scale_rgb(col, 1.25f), 0.9f);
+                      sr_scale_rgb(col, 1.25f), 0.9f);
         }
     }
     fill_circle(W * 0.5f + 72 * s, py + 230 * s, 8 * s, 0xf8fafc, 1.0f);
@@ -608,18 +479,39 @@ static void draw_flash(void)
     int ai = (int)(G.screenFlash * 0.36f * 256);
     if (ai <= 0) return;
     if (ai > 256) ai = 256;
-    uint8_t *p = fb;
-    for (size_t i = 0, n = (size_t)W * H; i < n; i++, p += 4) {
-        p[0] = (uint8_t)(p[0] + (((255 - p[0]) * ai) >> 8));
-        p[1] = (uint8_t)(p[1] + (((240 - p[1]) * ai) >> 8));
-        p[2] = (uint8_t)(p[2] + (((210 - p[2]) * ai) >> 8));
+    uint32_t *p = canvas.px;
+    for (size_t i = 0, n = (size_t)W * H; i < n; i++) {
+        uint32_t c = p[i];
+        int r = (c >> 16) & 255;
+        int g = (c >> 8) & 255;
+        int b = c & 255;
+        r += ((255 - r) * ai) >> 8;
+        g += ((240 - g) * ai) >> 8;
+        b += ((210 - b) * ai) >> 8;
+        p[i] = (c & 0xff000000u) |
+               ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+    }
+}
+
+/* repack the 0xAARRGGBB canvas into the R,G,B,A byte order the presenter
+ * (kittyfb_present) and the PPM dumps consume */
+static void repack_fb(void)
+{
+    const uint32_t *s = canvas.px;
+    uint8_t *d = fb;
+    for (size_t i = 0, n = (size_t)W * H; i < n; i++, d += 4) {
+        uint32_t c = s[i];
+        d[0] = (uint8_t)(c >> 16);
+        d[1] = (uint8_t)(c >> 8);
+        d[2] = (uint8_t)c;
+        d[3] = (uint8_t)(c >> 24);
     }
 }
 
 void render_frame(void)
 {
-    if (!fb || !backdrop) return;
-    memcpy(fb, backdrop, (size_t)W * H * 4);
+    if (!canvas.px || !backdrop.px || !fb) return;
+    memcpy(canvas.px, backdrop.px, (size_t)W * H * 4);
 
     float shake = G.cameraShake;
     OX = (int)(sinf(G.frameCount * 12.989f) * shake);
@@ -638,4 +530,5 @@ void render_frame(void)
     draw_hud();
     draw_state_overlay();
     draw_flash();
+    repack_fb();
 }

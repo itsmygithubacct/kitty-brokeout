@@ -69,11 +69,17 @@ clear, and game-over states without needing an interactive terminal.
 
 | File | Role |
 |------|------|
-| `src/term.c` | Kitty keyboard events, compatibility input, kitty graphics frames |
+| `src/term.c` | input glue over `kitty_keyboard`, presenter glue over `kitty-framebuffer` |
 | `src/game.c` | breakout rules, physics, levels, particles, powerups |
-| `src/render.c` | software rasterizer, scene, HUD, menus |
-| `src/sound.c` | procedural SFX synth and mixer |
+| `src/render.c` | scene, HUD, and menu drawing over the `soft-raster` primitives |
+| `src/sound.c` | procedural SFX synth, played through `pcm-mixer` |
 | `src/main.c` | interactive loop, selftest, render-test, sound-test |
+
+Generic terminal presentation, rasterization, and audio transport live in
+vendored libraries under `third_party/`: `kitty-framebuffer` (kitty graphics
+protocol frames, terminal setup/restore), `soft-raster` (anti-aliased
+primitives and the 8x16 font), `pcm-mixer` (voice mixing and the audio sink
+probe), and `kitty_keyboard` (keyboard protocol decoding).
 
 ## License
 
