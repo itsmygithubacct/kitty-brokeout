@@ -1,14 +1,13 @@
 /* Game state, physics, collisions, level generation, and input. */
 #include "kitty_brokeout.h"
-#include <errno.h>
+#include "kilix_state.h"
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #define PI 3.14159265358979323846f
-#define SCORE_PATH_MAX 4096
 
 GameState G;
 
@@ -43,62 +42,74 @@ static float frandr(float lo, float hi)
     return lo + (hi - lo) * frandf();
 }
 
-static bool path_join(char *out, size_t outLen, const char *base, const char *suffix)
+static bool high_score_store_init(kilixstate_store *store)
 {
-    size_t baseLen = strlen(base);
-    size_t suffixLen = strlen(suffix);
-    if (baseLen + suffixLen + 1 > outLen) return false;
-    memcpy(out, base, baseLen);
-    memcpy(out + baseLen, suffix, suffixLen + 1);
-    return true;
+    kilixstate_options options;
+
+    kilixstate_options_init(&options);
+    options.app_id = "kitty-brokeout";
+    options.filename = "highscore";
+    options.max_payload = 4u;
+    return kilixstate_store_init(store, &options) == KILIXSTATE_OK;
 }
 
-static bool high_score_path(char *path, size_t pathLen, bool create)
+static uint32_t read_le32(const unsigned char bytes[4])
 {
-    char dir[SCORE_PATH_MAX];
-    const char *xdg = getenv("XDG_DATA_HOME");
-    if (xdg && *xdg) {
-        if (!path_join(dir, sizeof dir, xdg, "/kitty-brokeout")) return false;
-        if (create) mkdir(xdg, 0700);
-    } else {
-        const char *home = getenv("HOME");
-        if (!home || !*home) return false;
-        char local[SCORE_PATH_MAX], share[SCORE_PATH_MAX];
-        if (!path_join(local, sizeof local, home, "/.local")) return false;
-        if (!path_join(share, sizeof share, local, "/share")) return false;
-        if (!path_join(dir, sizeof dir, share, "/kitty-brokeout")) return false;
-        if (create) {
-            mkdir(local, 0700);
-            mkdir(share, 0700);
-        }
-    }
-    if (create && mkdir(dir, 0700) != 0 && errno != EEXIST) return false;
-    return path_join(path, pathLen, dir, "/highscore");
+    return (uint32_t)bytes[0] | (uint32_t)bytes[1] << 8 |
+           (uint32_t)bytes[2] << 16 | (uint32_t)bytes[3] << 24;
+}
+
+static void write_le32(unsigned char bytes[4], uint32_t value)
+{
+    bytes[0] = (unsigned char)value;
+    bytes[1] = (unsigned char)(value >> 8);
+    bytes[2] = (unsigned char)(value >> 16);
+    bytes[3] = (unsigned char)(value >> 24);
 }
 
 static void load_high_score(void)
 {
-    char path[SCORE_PATH_MAX];
-    if (!high_score_path(path, sizeof path, false)) return;
-    FILE *f = fopen(path, "r");
-    if (!f) return;
-    int score = 0;
-    if (fscanf(f, "%d", &score) == 1 && score > 0)
-        G.highScore = score;
+    kilixstate_store store;
+    unsigned char payload[4];
+    size_t payload_size = 0u;
+    kilixstate_result result;
+
+    if (!high_score_store_init(&store)) return;
+    result = kilixstate_load(&store, payload, sizeof payload, &payload_size);
+    if (result == KILIXSTATE_OK && payload_size == sizeof payload &&
+        read_le32(payload) <= (uint32_t)INT_MAX) {
+        G.highScore = (int)read_le32(payload);
+    } else if (result == KILIXSTATE_CORRUPT) {
+        /* One-time upgrade from the original decimal text file. */
+        char path[KILIXSTATE_PATH_CAPACITY];
+        int score = 0;
+        if (kilixstate_store_path(&store, path, sizeof path) == KILIXSTATE_OK) {
+            FILE *file = fopen(path, "r");
+            if (file != NULL) {
+                if (fscanf(file, "%d", &score) == 1 && score > 0) {
+                    G.highScore = score;
+                    write_le32(payload, (uint32_t)score);
+                    (void)kilixstate_save(&store, payload, sizeof payload);
+                }
+                (void)fclose(file);
+            }
+        }
+    }
     G.savedHighScore = G.highScore;
-    fclose(f);
+    kilixstate_store_close(&store);
 }
 
 static void save_high_score(void)
 {
     if (G.headless || G.highScore <= G.savedHighScore) return;
-    char path[SCORE_PATH_MAX];
-    if (!high_score_path(path, sizeof path, true)) return;
-    FILE *f = fopen(path, "w");
-    if (!f) return;
-    fprintf(f, "%d\n", G.highScore);
-    fclose(f);
-    G.savedHighScore = G.highScore;
+    kilixstate_store store;
+    unsigned char payload[4];
+
+    if (!high_score_store_init(&store)) return;
+    write_le32(payload, (uint32_t)G.highScore);
+    if (kilixstate_save(&store, payload, sizeof payload) == KILIXSTATE_OK)
+        G.savedHighScore = G.highScore;
+    kilixstate_store_close(&store);
 }
 
 static void update_high_score(void)

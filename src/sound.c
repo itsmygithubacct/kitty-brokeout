@@ -2,8 +2,7 @@
  * at startup, then each valid reviewed WAV replaces its corresponding sample.
  * Transport and voice mixing live in the vendored pcm-mixer library. */
 #include "kitty_brokeout.h"
-#include "pcm_mixer.h"
-#include <limits.h>
+#include "pcmmix_bank.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,9 +12,7 @@
 #define SR 44100
 #define MAX_VOICES 24
 
-typedef struct { int16_t *data; int len; } Sample;
-
-static Sample samples[SOUND_COUNT];
+static pcmmix_bank sound_bank;
 static pcmmix mixer;
 static bool mixerStarted = false;
 static bool enabled = true;
@@ -56,8 +53,10 @@ static void bake(int id, const float *src, int n, float peak, bool fade)
         v = clampf(v, -1.0f, 1.0f);
         out[i] = (int16_t)(v * 32767.0f);
     }
-    samples[id].data = out;
-    samples[id].len = n;
+    pcmmix_bank_clear_cue(&sound_bank, (uint32_t)id);
+    if (!pcmmix_bank_take(&sound_bank, (uint32_t)id, 0u, out,
+                          (size_t)n, 1.0f, 1.0f))
+        free(out);
 }
 
 static void gen_sweep(int id, float f0, float f1, float dur, float peak)
@@ -227,22 +226,13 @@ static void load_external_sounds(void)
     for (int id = 0; id < SOUND_COUNT; id++) {
         char full[768];
         char err[128];
-        size_t frames = 0;
-        int16_t *data;
-
         if (!sound_files[id]) continue;
         if (snprintf(full, sizeof full, "%s/%s", sound_asset_root,
                      sound_files[id]) >= (int)sizeof full)
             continue;
-        data = pcmmix_wav_load(full, &frames, err, sizeof err);
-        if (!data) continue;
-        if (frames == 0 || frames > (size_t)INT_MAX) {
-            pcmmix_wav_free(data);
-            continue;
-        }
-        free(samples[id].data);
-        samples[id].data = data;
-        samples[id].len = (int)frames;
+        (void)pcmmix_bank_load_wav(&sound_bank, (uint32_t)id, 0u,
+                                   full, 1.0f, 1.0f,
+                                   err, sizeof err);
     }
 }
 
@@ -250,6 +240,7 @@ bool sound_init(void)
 {
     pcmmix_options options;
 
+    (void)pcmmix_bank_init(&sound_bank, SOUND_COUNT, 0x5f3759dfu);
     synth_all();
     load_external_sounds();
     pcmmix_options_init(&options);
@@ -267,11 +258,7 @@ void sound_shutdown(void)
         pcmmix_stop(&mixer);
         mixerStarted = false;
     }
-    for (int i = 0; i < SOUND_COUNT; i++) {
-        free(samples[i].data);
-        samples[i].data = NULL;
-        samples[i].len = 0;
-    }
+    pcmmix_bank_clear(&sound_bank);
 }
 
 void sound_set_enabled(bool on)
@@ -284,14 +271,12 @@ bool sound_is_enabled(void) { return enabled; }
 
 void sound_play(int id, float vol, float pitch)
 {
-    if (id < 0 || id >= SOUND_COUNT || !samples[id].data || !mixerStarted)
-        return;
-    pcmmix_sample sample = { samples[id].data, (size_t)samples[id].len };
+    if (id < 0 || id >= SOUND_COUNT || !mixerStarted) return;
     /* the original mixer soft-clipped with tanh(mix * 0.85); pcm-mixer's
      * master bus is tanh(mix), so fold the 0.85 into the voice gain to
      * keep the same loudness curve */
-    (void)pcmmix_play(&mixer, &sample, clampf(vol, 0, 1.5f) * 0.85f,
-                      pitch);
+    (void)pcmmix_bank_play(&mixer, &sound_bank, (uint32_t)id,
+                           clampf(vol, 0, 1.5f) * 0.85f, pitch);
 }
 
 void sound_loop(int id, bool on, float vol, float pitch)
